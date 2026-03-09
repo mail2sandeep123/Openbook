@@ -1,0 +1,280 @@
+"""
+Image Background Removal Tool
+A Python utility to remove backgrounds from images using multiple methods.
+"""
+
+import os
+import cv2
+import numpy as np
+from PIL import Image
+from typing import Tuple, Optional, Union
+import argparse
+from pathlib import Path
+
+
+class BackgroundRemover:
+    """
+    A class to remove image backgrounds using various methods.
+    
+    Methods:
+    - GrabCut algorithm (OpenCV)
+    - Threshold-based segmentation
+    - Alpha channel manipulation
+    - Deep learning-based (U2Net) - optional with additional dependencies
+    """
+    
+    def __init__(self, output_format: str = "PNG"):
+        """
+        Initialize the BackgroundRemover.
+        
+        Args:
+            output_format (str): Output image format (PNG, JPG, etc.)
+        """
+        self.output_format = output_format
+    
+    def remove_bg_grabcut(
+        self,
+        image_path: str,
+        output_path: str,
+        iterations: int = 5
+    ) -> bool:
+        """
+        Remove background using GrabCut algorithm.
+        
+        Args:
+            image_path (str): Path to input image
+            output_path (str): Path to save output image
+            iterations (int): Number of GrabCut iterations
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Read image
+            image = cv2.imread(image_path)
+            if image is None:
+                print(f"Error: Could not read image from {image_path}")
+                return False
+            
+            h, w = image.shape[:2]
+            
+            # Initialize mask
+            mask = np.zeros((h, w), np.uint8)
+            mask[:] = cv2.GC_PR_FGD  # Everything is probably foreground
+            
+            # Define bounding box (conservative estimate)
+            rect = (10, 10, w - 20, h - 20)
+            
+            # Background and foreground models
+            bgd_model = np.zeros((1, 65), np.float64)
+            fgd_model = np.zeros((1, 65), np.float64)
+            
+            # Apply GrabCut
+            cv2.grabCut(image, mask, rect, bgd_model, fgd_model, iterations, cv2.GC_INIT_WITH_RECT)
+            
+            # Create binary mask
+            mask2 = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype('uint8')
+            
+            # Apply morphological operations
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            mask2 = cv2.morphologyEx(mask2, cv2.MORPH_CLOSE, kernel, iterations=2)
+            
+            # Extract foreground
+            result = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
+            result[:, :, 3] = mask2
+            
+            # Save result
+            cv2.imwrite(output_path, result)
+            print(f"Image saved to {output_path}")
+            return True
+            
+        except Exception as e:
+            print(f"Error in remove_bg_grabcut: {e}")
+            return False
+    
+    def remove_bg_threshold(
+        self,
+        image_path: str,
+        output_path: str,
+        lower_color: Tuple[int, int, int] = (0, 0, 0),
+        upper_color: Tuple[int, int, int] = (50, 50, 50)
+    ) -> bool:
+        """
+        Remove background using color threshold method.
+        Best for images with distinct background colors (e.g., white or black).
+        
+        Args:
+            image_path (str): Path to input image
+            output_path (str): Path to save output image
+            lower_color (Tuple): Lower HSV bound for background color
+            upper_color (Tuple): Upper HSV bound for background color
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            image = cv2.imread(image_path)
+            if image is None:
+                print(f"Error: Could not read image from {image_path}")
+                return False
+            
+            # Convert to HSV
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            
+            # Create mask
+            mask = cv2.inRange(hsv, lower_color, upper_color)
+            mask_inv = cv2.bitwise_not(mask)
+            
+            # Apply morphological operations
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            mask_inv = cv2.morphologyEx(mask_inv, cv2.MORPH_CLOSE, kernel, iterations=2)
+            
+            # Apply mask
+            result = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
+            result[:, :, 3] = mask_inv
+            
+            # Save result
+            cv2.imwrite(output_path, result)
+            print(f"Image saved to {output_path}")
+            return True
+            
+        except Exception as e:
+            print(f"Error in remove_bg_threshold: {e}")
+            return False
+    
+    def remove_white_background(
+        self,
+        image_path: str,
+        output_path: str,
+        threshold: int = 240
+    ) -> bool:
+        """
+        Remove white background specifically.
+        
+        Args:
+            image_path (str): Path to input image
+            output_path (str): Path to save output image
+            threshold (int): Threshold value for white detection (0-255)
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            image = cv2.imread(image_path)
+            if image is None:
+                print(f"Error: Could not read image from {image_path}")
+                return False
+            
+            # Convert to grayscale
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Create mask for white areas
+            _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+            mask_inv = cv2.bitwise_not(mask)
+            
+            # Apply morphological operations
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask_inv = cv2.morphologyEx(mask_inv, cv2.MORPH_OPEN, kernel, iterations=1)
+            
+            # Apply mask
+            result = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
+            result[:, :, 3] = mask_inv
+            
+            # Save result
+            cv2.imwrite(output_path, result)
+            print(f"Image saved to {output_path}")
+            return True
+            
+        except Exception as e:
+            print(f"Error in remove_white_background: {e}")
+            return False
+    
+    def batch_remove_bg(
+        self,
+        input_dir: str,
+        output_dir: str,
+        method: str = "grabcut",
+        extensions: Tuple[str, ...] = (".jpg", ".jpeg", ".png")
+    ) -> None:
+        """
+        Process multiple images in a directory.
+        
+        Args:
+            input_dir (str): Input directory path
+            output_dir (str): Output directory path
+            method (str): Method to use ("grabcut", "threshold", "white")
+            extensions (Tuple): File extensions to process
+        """
+        try:
+            # Create output directory if it doesn't exist
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            
+            input_path = Path(input_dir)
+            
+            for image_file in input_path.iterdir():
+                if image_file.suffix.lower() in extensions:
+                    output_file = Path(output_dir) / f"{image_file.stem}_no_bg.png"
+                    
+                    print(f"Processing: {image_file.name}")
+                    
+                    if method == "grabcut":
+                        self.remove_bg_grabcut(str(image_file), str(output_file))
+                    elif method == "threshold":
+                        self.remove_bg_threshold(str(image_file), str(output_file))
+                    elif method == "white":
+                        self.remove_white_background(str(image_file), str(output_file))
+                        
+        except Exception as e:
+            print(f"Error in batch_remove_bg: {e}")
+
+
+def main():
+    """Main function for command-line usage."""
+    parser = argparse.ArgumentParser(
+        description="Remove image backgrounds using various methods"
+    )
+    
+    parser.add_argument(
+        "input",
+        help="Input image or directory path"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        help="Output image or directory path",
+        required=True
+    )
+    parser.add_argument(
+        "-m", "--method",
+        choices=["grabcut", "threshold", "white"],
+        default="grabcut",
+        help="Method to use for background removal"
+    )
+    parser.add_argument(
+        "-b", "--batch",
+        action="store_true",
+        help="Process directory as batch"
+    )
+    parser.add_argument(
+        "-i", "--iterations",
+        type=int,
+        default=5,
+        help="Number of iterations for GrabCut (default: 5)"
+    )
+    
+    args = parser.parse_args()
+    
+    remover = BackgroundRemover()
+    
+    if args.batch:
+        remover.batch_remove_bg(args.input, args.output, args.method)
+    else:
+        if args.method == "grabcut":
+            remover.remove_bg_grabcut(args.input, args.output, args.iterations)
+        elif args.method == "threshold":
+            remover.remove_bg_threshold(args.input, args.output)
+        elif args.method == "white":
+            remover.remove_white_background(args.input, args.output)
+
+
+if __name__ == "__main__":
+    main()
